@@ -49,7 +49,9 @@ public class AudioController {
     public ResponseEntity<Map<String, Object>> getStats() {
         return ResponseEntity.ok(Map.of(
             "status", "OK",
-            "service", "STT Processing Service"
+            "service", "STT Processing Service",
+            "requestCount", 0,
+            "totalAudioSeconds", 0
         ));
     }
 

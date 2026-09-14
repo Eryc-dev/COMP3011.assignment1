@@ -4,15 +4,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.MultipartBodyBuilder;
-import org.springframework.stereotype.Service; // 确保导入了 Service
-import org.springframework.web.client.RestClient;
-import org.springframework.web.multipart.MultipartFile;
-
-import java.io.IOException;
-import java.util.Map;
-import org.springframework.core.io.ByteArrayResource;
-import org.springframework.http.MediaType;
-import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.multipart.MultipartFile;
@@ -22,12 +13,12 @@ import java.util.Map;
 
 @Service
 public class OpenAiSttService {
-	private final RestClient restClient;
+    private final RestClient restClient;
     private final String apiKey;
 
     public OpenAiSttService(
             RestClient.Builder restClientBuilder,
-            @Value("${OPENAI_API_KEY}") String apiKey) {
+            @Value("${OPENAI_API_KEY:dummy_key_for_test}") String apiKey) {
         this.restClient = restClientBuilder
                 .baseUrl("https://api.openai.com/v1")
                 .build();
@@ -37,15 +28,20 @@ public class OpenAiSttService {
     public String transcribe(MultipartFile file) throws IOException {
         MultipartBodyBuilder builder = new MultipartBodyBuilder();
 
+        String filename = (file.getOriginalFilename() != null && !file.getOriginalFilename().isEmpty())
+                ? file.getOriginalFilename()
+                : "recording.wav";
+
         ByteArrayResource audioResource = new ByteArrayResource(file.getBytes()) {
             @Override
             public String getFilename() {
-                return file.getOriginalFilename() != null ? file.getOriginalFilename() : "audio.mp3";
+                return filename;
             }
         };
 
-        builder.part("file", audioResource);
-        builder.part("model", "gpt-4o-mini-transcribe");
+        builder.part("file", audioResource)
+               .header("Content-Disposition", "form-data; name=\"file\"; filename=\"" + filename + "\"");
+        builder.part("model", "whisper-1");
 
         Map<?, ?> response = restClient.post()
                 .uri("/audio/transcriptions")
@@ -61,5 +57,3 @@ public class OpenAiSttService {
         return "";
     }
 }
-
-
