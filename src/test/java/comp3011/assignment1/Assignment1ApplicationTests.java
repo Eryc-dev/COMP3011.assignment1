@@ -2,6 +2,7 @@ package comp3011.assignment1;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -29,7 +30,7 @@ class Assignment1ApplicationTests {
     @Autowired
     private Environment environment;
 
-    private final HttpClient client = HttpClient.newHttpClient();
+    private final HttpClient client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
 
     private String baseUrl() {
         return "http://localhost:" + environment.getProperty("local.server.port");
@@ -52,12 +53,29 @@ class Assignment1ApplicationTests {
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             for (int i = 0; i < requests; i++) {
                 String path = i % 2 == 0 ? "/api/v1/admin/uptime" : "/api/v1/global/stats";
-                results.add(executor.submit(() -> client.send(
-                        HttpRequest.newBuilder(URI.create(baseUrl() + path)).GET().build(),
-                        HttpResponse.BodyHandlers.discarding()).statusCode()));
+                results.add(executor.submit(() -> getStatus(path)));
             }
             for (Future<Integer> result : results) {
                 assertThat(result.get()).isEqualTo(200);
+            }
+        }
+    }
+
+    /**
+     * Sends a GET and returns the status code. Opening hundreds of sockets at the same instant can
+     * overflow the operating system's listen backlog on a desktop OS (e.g. Windows), which refuses the
+     * connection before it reaches the server, so a refused connect is retried briefly.
+     */
+    private int getStatus(String path) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl() + path)).GET().build();
+        for (int attempt = 1; ; attempt++) {
+            try {
+                return client.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
+            } catch (ConnectException e) {
+                if (attempt == 5) {
+                    throw e;
+                }
+                Thread.sleep(20L * attempt);
             }
         }
     }
