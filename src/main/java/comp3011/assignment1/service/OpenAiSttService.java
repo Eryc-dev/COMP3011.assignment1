@@ -1,110 +1,178 @@
 package comp3011.assignment1.service;
- 
-import org.springframework.beans.factory.annotation.Value;
+
+import java.io.IOException;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.multipart.MultipartFile;
- 
-import java.io.IOException;
-import java.util.Map;
- 
+
+import comp3011.assignment1.exception.InvalidAudioException;
+import comp3011.assignment1.exception.SpeechToTextException;
+
+/**
+ * Sends recorded audio to the OpenAI {@code /audio/transcriptions} endpoint using the
+ * {@code gpt-4o-mini-transcribe} model and records the reported token usage.
+ *
+ * <p>The call is a normal blocking HTTP request. Because the application runs request handling on
+ * Java virtual threads ({@code spring.threads.virtual.enabled=true}), a blocked call parks a cheap
+ * virtual thread instead of an OS thread, so hundreds of overlapping transcriptions and API
+ * queries do not starve each other.
+ */
 @Service
 public class OpenAiSttService {
- 
-    private final RestClient restClient;
-    private final String apiKey;
- 
-    public OpenAiSttService(
-            RestClient.Builder builder,
-            @Value("${openai.base-url:${openai.api-base:${OPENAI_BASE_URL:${OPENAI_API_BASE:https://api.openai.com/v1}}}}")
-            String baseUrl,
 
-            @Value("${openai.api-key:${openai.key:${OPENAI_API_KEY:dummy_key}}}")
-            String apiKey) {
- 
-        String normalizedBaseUrl = baseUrl.trim();
-        if (normalizedBaseUrl.endsWith("/")) {
-            normalizedBaseUrl = normalizedBaseUrl.substring(0, normalizedBaseUrl.length() - 1);
-        }
-        if (!normalizedBaseUrl.endsWith("/v1")) {
-            normalizedBaseUrl = normalizedBaseUrl + "/v1";
-        }
- 
-        this.restClient = builder.baseUrl(normalizedBaseUrl).build();
-        this.apiKey = apiKey;
+    private static final Logger log = LoggerFactory.getLogger(OpenAiSttService.class);
+
+    /** Model mandated by the assignment specification. */
+    public static final String MODEL = "gpt-4o-mini-transcribe";
+
+    /** Container formats accepted by the OpenAI transcription API. */
+    private static final Set<String> SUPPORTED_EXTENSIONS =
+            Set.of("flac", "m4a", "mp3", "mp4", "mpeg", "mpga", "oga", "ogg", "wav", "webm");
+
+    private final RestClient openAiRestClient;
+    private final TokenUsageService tokenUsageService;
+
+    public OpenAiSttService(RestClient openAiRestClient, TokenUsageService tokenUsageService) {
+        this.openAiRestClient = openAiRestClient;
+        this.tokenUsageService = tokenUsageService;
     }
- 
-   
-    public TranscriptionResult transcribe(MultipartFile file) throws IOException {
-        MultipartBodyBuilder builder = new MultipartBodyBuilder();
- 
-        String originalFilename = file.getOriginalFilename();
-        String finalFilename;
-        if (originalFilename == null || originalFilename.isBlank()) {
-            finalFilename = "audio.wav";
-        } else if (!originalFilename.contains(".")) {
-            finalFilename = originalFilename + ".wav";
-        } else {
-            finalFilename = originalFilename;
+
+    /**
+     * Transcribes the uploaded audio and adds its token usage to the global counters.
+     *
+     * @param file audio uploaded by a browser or API client
+     * @return the transcription text and token usage
+     * @throws InvalidAudioException   if the upload is missing, empty or unreadable
+     * @throws SpeechToTextException   if OpenAI returns an error or cannot be reached
+     */
+    public TranscriptionResult transcribe(MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            throw new InvalidAudioException("Please upload a non-empty audio file in the 'file' part.");
         }
- 
-        byte[] bytes = file.getBytes();
- 
-        ByteArrayResource audioResource = new ByteArrayResource(bytes) {
-            @Override
-            public String getFilename() {
-                return finalFilename;
-            }
-        };
- 
-        builder.part("file", audioResource, MediaType.parseMediaType("audio/wav"))
-                .filename(finalFilename);
 
-        builder.part("model", "gpt-4o-mini-transcribe");
+        String extension = resolveExtension(file.getContentType(), file.getOriginalFilename());
+        String filename = "audio." + extension;
+        MediaType partType = resolveMediaType(file.getContentType());
 
-        builder.part("response_format", "json");
- 
+        byte[] bytes;
         try {
-            Map<?, ?> response = restClient.post()
+            bytes = file.getBytes();
+        } catch (IOException e) {
+            throw new InvalidAudioException("Could not read the uploaded audio file.");
+        }
+
+        MultipartBodyBuilder body = new MultipartBodyBuilder();
+        // OpenAI identifies the audio container from the filename extension, so it must match the bytes.
+        body.part("file", new NamedByteArrayResource(bytes, filename), partType).filename(filename);
+        body.part("model", MODEL);
+        body.part("response_format", "json");
+
+        Map<?, ?> response;
+        try {
+            response = openAiRestClient.post()
                     .uri("/audio/transcriptions")
-                    .header("Authorization", "Bearer " + apiKey)
                     .contentType(MediaType.MULTIPART_FORM_DATA)
-                    .body(builder.build())
+                    .body(body.build())
                     .retrieve()
                     .body(Map.class);
- 
-            if (response == null) {
-                return new TranscriptionResult("", 0, 0);
+        } catch (RestClientResponseException e) {
+            // The upstream body describes the problem (e.g. unsupported format) and never contains our key.
+            log.warn("OpenAI returned HTTP {} for {} ({} bytes): {}",
+                    e.getStatusCode().value(), filename, bytes.length, e.getResponseBodyAsString());
+            throw new SpeechToTextException(
+                    "Speech-to-text service rejected the request (HTTP " + e.getStatusCode().value() + ").", e);
+        } catch (RestClientException e) {
+            throw new SpeechToTextException("Speech-to-text service is unavailable.", e);
+        }
+
+        TranscriptionResult result = parse(response);
+        tokenUsageService.record(result.inputTokens(), result.outputTokens());
+        log.debug("Transcribed {} bytes of {}: {} input / {} output tokens",
+                bytes.length, extension, result.inputTokens(), result.outputTokens());
+        return result;
+    }
+
+    /** Extracts text and token usage from the OpenAI JSON response. */
+    static TranscriptionResult parse(Map<?, ?> response) {
+        if (response == null) {
+            return new TranscriptionResult("", 0, 0);
+        }
+        Object text = response.get("text");
+        long input = 0;
+        long output = 0;
+        if (response.get("usage") instanceof Map<?, ?> usage) {
+            input = readLong(usage.get("input_tokens"));
+            output = readLong(usage.get("output_tokens"));
+        }
+        return new TranscriptionResult(text == null ? "" : text.toString(), input, output);
+    }
+
+    /**
+     * Chooses a file extension that matches the real audio container.
+     *
+     * <p>The part's content type is preferred (browsers set it from MediaRecorder's mime type);
+     * the original filename extension is used for API clients that send a generic content type.
+     */
+    static String resolveExtension(String contentType, String originalFilename) {
+        String type = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
+        if (type.contains("webm")) return "webm";
+        if (type.contains("ogg")) return "ogg";
+        if (type.contains("mp4") || type.contains("m4a") || type.contains("aac")) return "mp4";
+        if (type.contains("mpeg") || type.contains("mp3")) return "mp3";
+        if (type.contains("wav")) return "wav";
+        if (type.contains("flac")) return "flac";
+
+        if (originalFilename != null) {
+            int dot = originalFilename.lastIndexOf('.');
+            if (dot >= 0) {
+                String ext = originalFilename.substring(dot + 1).toLowerCase(Locale.ROOT);
+                if (SUPPORTED_EXTENSIONS.contains(ext)) {
+                    return ext;
+                }
             }
- 
-            String text = response.get("text") != null ? response.get("text").toString() : "";
-            long inputTokens = 0;
-            long outputTokens = 0;
- 
-            Object usageObj = response.get("usage");
-            if (usageObj instanceof Map<?, ?> usage) {
-                inputTokens = readTokenCount(usage, "input_tokens", "prompt_tokens");
-                outputTokens = readTokenCount(usage, "output_tokens", "completion_tokens");
-            }
- 
-            return new TranscriptionResult(text, inputTokens, outputTokens);
-        } catch (Exception e) {
-            throw new IOException("STT processing error: " + e.getMessage(), e);
+        }
+        // MediaRecorder in Chromium-based browsers defaults to webm.
+        return "webm";
+    }
+
+    /** Uses the upload's content type without codec parameters, or a generic binary type. */
+    static MediaType resolveMediaType(String contentType) {
+        try {
+            MediaType parsed = MediaType.parseMediaType(contentType);
+            return new MediaType(parsed.getType(), parsed.getSubtype());
+        } catch (RuntimeException e) {
+            return MediaType.APPLICATION_OCTET_STREAM;
         }
     }
- 
-   
-    private long readTokenCount(Map<?, ?> usage, String primaryKey, String fallbackKey) {
-        Object value = usage.get(primaryKey);
-        if (value == null) {
-            value = usage.get(fallbackKey);
+
+    private static long readLong(Object value) {
+        return value instanceof Number number ? number.longValue() : 0;
+    }
+
+    /** Byte array resource that reports a filename, which multipart encoding requires. */
+    private static final class NamedByteArrayResource extends ByteArrayResource {
+
+        private final String filename;
+
+        NamedByteArrayResource(byte[] bytes, String filename) {
+            super(bytes);
+            this.filename = filename;
         }
-        if (value instanceof Number number) {
-            return number.longValue();
+
+        @Override
+        public String getFilename() {
+            return filename;
         }
-        return 0;
     }
 }
