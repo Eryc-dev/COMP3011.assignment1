@@ -64,6 +64,8 @@ public class OpenAiSttService {
         String extension = resolveExtension(file.getContentType(), file.getOriginalFilename());
         String filename = "audio." + extension;
         MediaType partType = resolveMediaType(file.getContentType());
+        log.info("Transcribing upload '{}' ({}, {} bytes) as {}",
+                file.getOriginalFilename(), file.getContentType(), file.getSize(), filename);
 
         byte[] bytes;
         try {
@@ -90,10 +92,11 @@ public class OpenAiSttService {
             // The upstream body describes the problem (e.g. unsupported format) and never contains our key.
             log.warn("OpenAI returned HTTP {} for {} ({} bytes): {}",
                     e.getStatusCode().value(), filename, bytes.length, e.getResponseBodyAsString());
-            throw new SpeechToTextException(
-                    "Speech-to-text service rejected the request (HTTP " + e.getStatusCode().value() + ").", e);
+            throw new SpeechToTextException("Speech-to-text service rejected the request (HTTP "
+                    + e.getStatusCode().value() + ")" + upstreamMessage(e.getResponseBodyAsString()), e);
         } catch (RestClientException e) {
-            throw new SpeechToTextException("Speech-to-text service is unavailable.", e);
+            log.warn("Could not reach OpenAI: {}", e.toString());
+            throw new SpeechToTextException("Speech-to-text service is unavailable: " + e.getClass().getSimpleName(), e);
         }
 
         TranscriptionResult result = parse(response);
@@ -154,6 +157,15 @@ public class OpenAiSttService {
         } catch (RuntimeException e) {
             return MediaType.APPLICATION_OCTET_STREAM;
         }
+    }
+
+    /** Extracts OpenAI's human-readable error message (safe to show; it never contains our key). */
+    static String upstreamMessage(String body) {
+        if (body == null) {
+            return ".";
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"message\"\\s*:\\s*\"([^\"]{0,200})").matcher(body);
+        return m.find() ? ": " + m.group(1) : ".";
     }
 
     private static long readLong(Object value) {

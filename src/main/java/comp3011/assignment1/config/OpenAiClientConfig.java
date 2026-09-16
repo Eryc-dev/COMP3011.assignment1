@@ -36,6 +36,7 @@ public class OpenAiClientConfig {
             @Value("${openai.read-timeout-seconds:60}") long readTimeoutSeconds,
             @Value("${OPENAI_API_KEY:}") String apiKey) {
 
+        log.info("OpenAI base URL: {} (API key present: {})", baseUrl, !apiKey.isBlank());
         if (apiKey.isBlank()) {
             // Only report that the key is missing - never its value.
             log.warn("OPENAI_API_KEY is not set; transcription requests will fail.");
@@ -43,6 +44,8 @@ public class OpenAiClientConfig {
 
         HttpClient httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
+                // HTTP/1.1 avoids HTTP/2 stream issues with large multipart uploads.
+                .version(HttpClient.Version.HTTP_1_1)
                 .build();
         JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
         requestFactory.setReadTimeout(Duration.ofSeconds(readTimeoutSeconds));
