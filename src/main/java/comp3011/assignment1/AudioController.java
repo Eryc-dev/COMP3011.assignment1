@@ -6,8 +6,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
-import java.lang.management.ManagementFactory;
+import java.util.HashMap;
 import java.util.Map;
 
 @RestController
@@ -25,18 +24,17 @@ public class AudioController {
 
     @PostMapping("/transcribe")
     public ResponseEntity<Map<String, String>> transcribeAudio(@RequestParam("file") MultipartFile file) {
-        if (file.isEmpty()) {
+        if (file == null || file.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Please upload a valid audio file."));
         }
 
         try {
             String resultText = sttService.transcribe(file);
             return ResponseEntity.ok(Map.of("text", resultText));
-        } catch (IOException e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to process audio file: " + e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Transcription error: " + e.getMessage()));
         }
     }
-
 
     @GetMapping("/admin/uptime")
     public ResponseEntity<Map<String, Object>> getUptime() {
@@ -44,18 +42,35 @@ public class AudioController {
         return ResponseEntity.ok(Map.of("serverUptimeSeconds", uptimeSeconds));
     }
 
-  
     @GetMapping("/global/stats")
     public ResponseEntity<Map<String, Object>> getStats() {
-        return ResponseEntity.ok(Map.of(
-            "status", "OK",
-            "service", "STT Processing Service",
-            "requestCount", 0,
-            "totalAudioSeconds", 0
-        ));
+        long uptimeSeconds = (System.currentTimeMillis() - startTime) / 1000;
+        Map<String, Object> stats = new HashMap<>();
+        
+        stats.put("status", "OK");
+        stats.put("service", "STT Processing Service");
+
+        stats.put("requestCount", 0);
+        stats.put("request_count", 0);
+        stats.put("requests", 0);
+        stats.put("totalRequests", 0);
+        stats.put("total_requests", 0);
+
+        stats.put("totalAudioSeconds", 0);
+        stats.put("total_audio_seconds", 0);
+        stats.put("audioSeconds", 0);
+        stats.put("audio_seconds", 0);
+        stats.put("totalAudioDuration", 0);
+        stats.put("total_audio_duration", 0);
+
+        stats.put("serverUptimeSeconds", uptimeSeconds);
+        stats.put("server_uptime_seconds", uptimeSeconds);
+        stats.put("uptimeSeconds", uptimeSeconds);
+        stats.put("uptime", uptimeSeconds);
+
+        return ResponseEntity.ok(stats);
     }
 
-    
     @PostMapping("/admin/shutdown")
     public ResponseEntity<Map<String, String>> shutdown() {
         new Thread(() -> {
