@@ -1,5 +1,6 @@
 package comp3011.assignment1.config;
 
+import java.net.ProxySelector;
 import java.net.http.HttpClient;
 import java.time.Duration;
 
@@ -46,6 +47,9 @@ public class OpenAiClientConfig {
                 .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
                 // HTTP/1.1 avoids HTTP/2 stream issues with large multipart uploads.
                 .version(HttpClient.Version.HTTP_1_1)
+                // Honour -Dhttps.proxyHost/-Dhttps.proxyPort (TITAN routes outbound traffic via a proxy);
+                // a JDK HttpClient ignores those system properties unless told to use the default selector.
+                .proxy(ProxySelector.getDefault())
                 .build();
         JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
         requestFactory.setReadTimeout(Duration.ofSeconds(readTimeoutSeconds));

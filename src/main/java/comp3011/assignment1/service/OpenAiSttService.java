@@ -8,9 +8,12 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.stereotype.Service;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
@@ -74,18 +77,24 @@ public class OpenAiSttService {
             throw new InvalidAudioException("Could not read the uploaded audio file.");
         }
 
-        MultipartBodyBuilder body = new MultipartBodyBuilder();
+        // Build the multipart form with a plain MultiValueMap (written by FormHttpMessageConverter).
+        // MultipartBodyBuilder is avoided because it needs reactive-streams, which a servlet app lacks.
+        HttpHeaders fileHeaders = new HttpHeaders();
+        fileHeaders.setContentType(partType);
         // OpenAI identifies the audio container from the filename extension, so it must match the bytes.
-        body.part("file", new NamedByteArrayResource(bytes, filename), partType).filename(filename);
-        body.part("model", MODEL);
-        body.part("response_format", "json");
+        fileHeaders.setContentDispositionFormData("file", filename);
+
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add("file", new HttpEntity<>(new NamedByteArrayResource(bytes, filename), fileHeaders));
+        body.add("model", MODEL);
+        body.add("response_format", "json");
 
         Map<?, ?> response;
         try {
             response = openAiRestClient.post()
                     .uri("/audio/transcriptions")
                     .contentType(MediaType.MULTIPART_FORM_DATA)
-                    .body(body.build())
+                    .body(body)
                     .retrieve()
                     .body(Map.class);
         } catch (RestClientResponseException e) {
