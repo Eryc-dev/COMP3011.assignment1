@@ -2,72 +2,167 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Audio STT Recorder</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Speech to Text</title>
+    <style>
+        body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 640px;
+               margin: 40px auto; padding: 0 16px; color: #1f2933; }
+        h1 { font-size: 1.6rem; }
+        .controls { display: flex; gap: 12px; margin: 16px 0; }
+        button { font-size: 1rem; padding: 10px 18px; border-radius: 8px; border: 1px solid #52606d;
+                 background: #fff; cursor: pointer; }
+        button:disabled { opacity: 0.45; cursor: not-allowed; }
+        #recordButton:not(:disabled) { background: #d64545; color: #fff; border-color: #d64545; }
+        .status { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; background: #9aa5b1; }
+        .dot.recording { background: #e12d39; animation: pulse 1s infinite; }
+        .dot.processing { background: #f0b429; }
+        .dot.done { background: #3ebd93; }
+        .dot.error { background: #7b8794; }
+        @keyframes pulse { 50% { opacity: 0.25; } }
+        #result { min-height: 3em; padding: 12px; border-radius: 8px; background: #f5f7fa;
+                  white-space: pre-wrap; }
+        #error { color: #ab091e; }
+    </style>
 </head>
 <body>
-    <h1>Audio Recorder</h1>
-    <button id="recordButton">Record Audio</button>
-    <button id="stopButton" disabled>Stop Recording</button>
-    <p>Status: <span id="status">Idle</span></p>
-    <h3>Transcription:</h3>
+    <h1>Speech to Text</h1>
+    <p>Click <strong>Record Audio</strong>, speak, then click <strong>Stop Recording</strong>.</p>
+
+    <div class="controls">
+        <button id="recordButton" type="button">Record Audio</button>
+        <button id="stopButton" type="button" disabled>Stop Recording</button>
+    </div>
+
+    <p class="status" aria-live="polite">
+        <span id="statusDot" class="dot"></span>
+        Status: <span id="status">Ready to record</span>
+    </p>
+
+    <h2>Transcription</h2>
     <p id="result"></p>
+    <p id="error" role="alert"></p>
 
     <script>
-        let mediaRecorder;
-        let audioChunks = [];
+        'use strict';
+
+        /** Transcription endpoint on our own backend (the OpenAI key never reaches the browser). */
+        const TRANSCRIBE_URL = '/api/v1/transcribe';
+        /** Abort the upload if the backend has not answered within this many milliseconds. */
+        const REQUEST_TIMEOUT_MS = 30000;
+        /**
+         * Browsers cannot record WAV natively; MediaRecorder produces webm/ogg (Chrome, Firefox)
+         * or mp4 (Safari). We pick the first supported container and label the upload honestly,
+         * otherwise OpenAI rejects the file as an invalid format.
+         */
+        const MIME_CANDIDATES = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
 
         const recordButton = document.getElementById('recordButton');
         const stopButton = document.getElementById('stopButton');
-        const statusSpan = document.getElementById('status');
-        const resultParagraph = document.getElementById('result');
+        const statusText = document.getElementById('status');
+        const statusDot = document.getElementById('statusDot');
+        const resultText = document.getElementById('result');
+        const errorText = document.getElementById('error');
 
-        recordButton.addEventListener('click', async () => {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
-            
+        let mediaRecorder = null;
+        let chunks = [];
+
+        function setStatus(text, state) {
+            statusText.textContent = text;
+            statusDot.className = 'dot ' + (state || '');
+        }
+
+        function pickMimeType() {
+            if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) {
+                return '';
+            }
+            return MIME_CANDIDATES.find(type => MediaRecorder.isTypeSupported(type)) || '';
+        }
+
+        function extensionFor(mimeType) {
+            if (mimeType.includes('webm')) return 'webm';
+            if (mimeType.includes('ogg')) return 'ogg';
+            if (mimeType.includes('mp4')) return 'mp4';
+            if (mimeType.includes('wav')) return 'wav';
+            return 'webm';
+        }
+
+        async function startRecording() {
+            errorText.textContent = '';
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            } catch (err) {
+                setStatus('Microphone unavailable', 'error');
+                errorText.textContent = 'Could not access the microphone: ' + err.message;
+                return;
+            }
+
+            const preferred = pickMimeType();
+            mediaRecorder = preferred ? new MediaRecorder(stream, { mimeType: preferred }) : new MediaRecorder(stream);
+            chunks = [];
+
             mediaRecorder.ondataavailable = event => {
-                audioChunks.push(event.data);
+                if (event.data && event.data.size > 0) {
+                    chunks.push(event.data);
+                }
             };
 
-            mediaRecorder.onstop = async () => {
-                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                const formData = new FormData();
-                formData.append('file', audioBlob, 'recording.wav');
-
-                try {
-                    const response = await fetch('/api/v1/transcribe', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    const data = await response.json();
-                    if (data.text) {
-                        resultParagraph.innerText = data.text;
-                        statusSpan.innerText = 'Transcription completed';
-                    } else {
-                        statusSpan.innerText = 'Error occurred';
-                        resultParagraph.innerText = data.error || 'Unknown error';
-                    }
-                } catch (error) {
-                    statusSpan.innerText = 'Error occurred';
-                    resultParagraph.innerText = error.message;
-                }
-                
-                audioChunks = [];
+            mediaRecorder.onstop = () => {
+                // Release the microphone so the browser's recording indicator turns off.
+                stream.getTracks().forEach(track => track.stop());
+                const mimeType = mediaRecorder.mimeType || preferred || 'audio/webm';
+                const blob = new Blob(chunks, { type: mimeType });
+                chunks = [];
+                uploadRecording(blob, extensionFor(mimeType));
             };
 
             mediaRecorder.start();
-            statusSpan.innerText = 'Recording started...';
             recordButton.disabled = true;
             stopButton.disabled = false;
-        });
+            setStatus('Recording... speak now', 'recording');
+        }
 
-        stopButton.addEventListener('click', () => {
-            mediaRecorder.stop();
-            statusSpan.innerText = 'Processing...';
-            recordButton.disabled = false;
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+            }
+            // Return straight to a state that can accept a new recording.
             stopButton.disabled = true;
-        });
+            recordButton.disabled = false;
+            setStatus('Recording stopped - transcribing...', 'processing');
+        }
+
+        async function uploadRecording(blob, extension) {
+            const formData = new FormData();
+            formData.append('file', blob, 'recording.' + extension);
+
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+            try {
+                const response = await fetch(TRANSCRIBE_URL, {
+                    method: 'POST',
+                    body: formData,
+                    signal: controller.signal
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.message || ('Server responded with HTTP ' + response.status));
+                }
+                resultText.textContent = data.text || '';
+                errorText.textContent = '';
+                setStatus('Transcription complete - ready to record again', 'done');
+            } catch (err) {
+                const message = err.name === 'AbortError' ? 'The request timed out.' : err.message;
+                errorText.textContent = 'Transcription failed: ' + message;
+                setStatus('Transcription failed - ready to record again', 'error');
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        recordButton.addEventListener('click', startRecording);
+        stopButton.addEventListener('click', stopRecording);
     </script>
 </body>
 </html>
