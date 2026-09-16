@@ -41,7 +41,7 @@ public class ServerLifecycleService {
     }
 
     /** Test-friendly constructor allowing a fixed start time and a fake shutdown action. */
-    ServerLifecycleService(Instant serverStart, Runnable shutdownAction) {
+    public ServerLifecycleService(Instant serverStart, Runnable shutdownAction) {
         this.serverStart = serverStart;
         this.shutdownAction = shutdownAction;
     }
